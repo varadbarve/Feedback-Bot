@@ -9,7 +9,6 @@ USERNAME = os.getenv("SRM_USERNAME", "")
 PASSWORD = os.getenv("SRM_PASSWORD", "")
 
 LOGIN_URL = "https://sp.srmist.edu.in/srmiststudentportal/students/loginManager/youLogin.jsp"
-FEEDBACK_URL = "https://sp.srmist.edu.in/srmiststudentportal/students/report/studentFeedback.jsp"
 
 RATING = "EXCELLENT"  # matched case-insensitively against dropdown options
 
@@ -24,45 +23,63 @@ async def find_best_rating_match(select_el, target_rating):
     return None
 
 
-async def fill_feedback_for_course(page, course_index):
-    try:
-        await page.goto(FEEDBACK_URL, wait_until="networkidle", timeout=30000)
-    except Exception as e:
-        print(f"  [!] Failed to load feedback page: {e}")
-        return False
+async def is_subject_dropdown(select_el):
+    """Check if a select element looks like the subject/course dropdown."""
+    options = await select_el.locator("option").all()
+    if len(options) > 2:  # has multiple courses
+        return True
+    return False
 
-    # Pick the course by index
-    course_dropdown = page.locator("select").nth(0)
-    options = await course_dropdown.locator("option").all()
-    if course_index >= len(options) - 1:  # skip the first blank/SELECT option
-        return False
 
-    course_text = (await options[course_index + 1].text_content()).strip()
+async def fill_feedback_for_subject(page, subject_dropdown, subject_index):
+    """Fill feedback for a single subject by selecting it from the dropdown."""
+    options = await subject_dropdown.locator("option").all()
+
+    # Get the subject text
+    subject_text = (await options[subject_index].text_content()).strip()
+    if not subject_text or subject_text.lower() in ["select", "--select--", "-- select --", ""]:
+        return "skip"
+
     print(f"\n{'='*50}")
-    print(f"Course {course_index + 1}: {course_text}")
+    print(f"Subject: {subject_text}")
     print(f"{'='*50}")
 
-    await course_dropdown.select_option(index=course_index + 1)
-    await page.wait_for_timeout(1500)  # wait for dependent dropdowns to populate
+    # Select the subject
+    try:
+        await subject_dropdown.select_option(index=subject_index)
+    except Exception as e:
+        print(f"  [!] Could not select subject: {e}")
+        return "skip"
 
-    # Select teacher (pick first available if more than the default)
-    teacher_dropdown = page.locator("select").nth(1)
-    teacher_options = await teacher_dropdown.locator("option").all()
-    if len(teacher_options) > 1:
-        teacher_text = (await teacher_options[1].text_content()).strip()
-        await teacher_dropdown.select_option(index=1)
-        print(f"  Teacher: {teacher_text}")
-        await page.wait_for_timeout(500)
-    else:
-        print("  [!] No teacher found for this course, skipping.")
-        return True  # not an error, just nothing to fill
+    await page.wait_for_timeout(2000)  # wait for page to update
 
-    # Fill all feedback question dropdowns with RATING
+    # After selecting a subject, find all NEW select dropdowns on the page
+    # (excluding the subject dropdown itself and any "Semester" textbox)
     all_selects = await page.locator("select").all()
+
+    # Identify which selects are rating dropdowns (not the subject dropdown)
     filled_count = 0
     skipped_count = 0
-    for sel in all_selects[2:]:  # skip course and teacher dropdowns
+    for sel in all_selects:
         try:
+            # Skip if this is the subject dropdown itself
+            sel_options = await sel.locator("option").all()
+            option_texts = []
+            for opt in sel_options:
+                option_texts.append((await opt.text_content()).strip().lower())
+
+            # Skip dropdowns that look like subject/course selectors or semester selectors
+            if any("select" in t for t in option_texts[:1]):  # first option is "Select..."
+                # Check if this is a rating dropdown by looking for rating keywords
+                has_rating = any(
+                    keyword in " ".join(option_texts)
+                    for keyword in ["excellent", "good", "average", "poor", "very good", "satisfactory"]
+                )
+                if not has_rating:
+                    skipped_count += 1
+                    continue
+
+            # Try to set the rating
             match = await find_best_rating_match(sel, RATING)
             if match:
                 await sel.select_option(label=match)
@@ -75,8 +92,8 @@ async def fill_feedback_for_course(page, course_index):
     print(f"  Filled {filled_count} rating fields (skipped {skipped_count})")
 
     if filled_count == 0:
-        print("  [!] No rating fields were filled — skipping submission.")
-        return True
+        print("  [!] No rating fields were filled — may be already submitted. Skipping.")
+        return "skip"
 
     # Handle confirmation dialogs (accept any alert/confirm that pops up)
     page.on("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
@@ -87,28 +104,47 @@ async def fill_feedback_for_course(page, course_index):
         'input[type="submit"]',
         'button[type="submit"]',
         'input[value="Submit"]',
+        'input[value="SUBMIT"]',
+        'input[value="submit"]',
         'button:has-text("Submit")',
+        'button:has-text("SUBMIT")',
         'a:has-text("Submit")',
         'input[type="button"][value="Submit"]',
+        'input[type="button"][value="SUBMIT"]',
+        'button',  # any button at all
+        'input[type="button"]',
     ]:
         loc = page.locator(selector).first
         if await loc.count() > 0:
             submit_btn = loc
+            btn_text = await loc.text_content() or await loc.get_attribute("value") or selector
+            print(f"  Found submit button: '{btn_text.strip()}' ({selector})")
             break
 
     if submit_btn is None:
-        print("  [!] Could not find submit button — skipping this course.")
-        return True
+        # Debug: print all clickable elements
+        print("  [DEBUG] All buttons/inputs on page:")
+        for tag in ["button", "input[type='button']", "input[type='submit']", "a.btn", "[role='button']"]:
+            els = await page.locator(tag).all()
+            for el in els:
+                txt = (await el.text_content() or "").strip()
+                val = await el.get_attribute("value") or ""
+                print(f"    <{tag}> text='{txt}' value='{val}'")
+        print("  [!] Could not find submit button — skipping.")
+        return "skip"
 
     try:
         await submit_btn.click()
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(2000)
         print(f"  ✓ Feedback submitted successfully!")
     except Exception as e:
         print(f"  [!] Error during submission: {e}")
 
-    return True
+    # After submission, the page may show a Semester textbox or reload.
+    # Wait a moment then continue to the next subject — don't touch anything else.
+    await page.wait_for_timeout(1000)
+
+    return "done"
 
 
 async def run():
@@ -122,6 +158,8 @@ async def run():
 
         # Auto-fill username and password
         try:
+            # Remove maxlength=6 restriction on the NetID field
+            await page.evaluate('document.querySelector("#username").removeAttribute("maxlength")')
             await page.fill('#username', USERNAME)
             await page.fill('#password', PASSWORD)
             print("Credentials auto-filled!")
@@ -130,45 +168,89 @@ async def run():
 
         print("=" * 50)
         print("Solve the CAPTCHA and click Login in the browser.")
-        print("After you're logged in, press ENTER here to continue...")
+        print("Once you're logged in, press ENTER here...")
         print("=" * 50)
         await asyncio.get_event_loop().run_in_executor(None, input)
 
-        # Verify login by navigating to feedback page
-        try:
-            await page.goto(FEEDBACK_URL, wait_until="networkidle", timeout=30000)
-        except Exception as e:
-            print(f"[!] Failed to navigate to feedback page: {e}")
+        # Check we're not still on login
+        current_url = page.url
+        print(f"Current URL: {current_url}")
+        if "login" in current_url.lower():
+            print("[!] It looks like you're still on the login page. Please try again.")
             await browser.close()
             return
 
-        # Check if we got redirected back to login (means login failed/expired)
-        if "login" in page.url.lower():
-            print("[!] It looks like you're not logged in. Please try again.")
-            await browser.close()
-            return
+        print("Logged in! Looking for 'End Sem feedback' link...")
+        await page.wait_for_timeout(2000)
 
-        print("Login verified! Starting feedback automation...\n")
-
-        # Count courses
-        course_dropdown = page.locator("select").nth(0)
-        options = await course_dropdown.locator("option").all()
-        num_courses = len(options) - 1  # subtract the blank default option
-        print(f"Found {num_courses} course(s) to fill feedback for.")
-
-        if num_courses <= 0:
-            print("[!] No courses found. The page structure may have changed.")
-            await browser.close()
-            return
-
-        for i in range(num_courses):
-            success = await fill_feedback_for_course(page, i)
-            if not success:
-                print(f"\n[!] Stopped at course index {i}.")
+        # Click the "End Sem feedback" link on the dashboard
+        feedback_link = None
+        for selector in [
+            'a:has-text("End Sem")',
+            'a:has-text("end sem")',
+            'a:has-text("Feedback")',
+            'a:has-text("feedback")',
+        ]:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                feedback_link = loc
+                print(f"  Found link with selector: {selector}")
                 break
 
+        if feedback_link is None:
+            print("\n[!] Could not find 'End Sem feedback' link automatically.")
+            print("Please click it manually in the browser, then press ENTER here...")
+            await asyncio.get_event_loop().run_in_executor(None, input)
+        else:
+            await feedback_link.click()
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_timeout(3000)
+
+        print(f"Feedback page URL: {page.url}")
+        print("Starting feedback automation...\n")
+
+        # Wait for page content to fully load
+        await page.wait_for_timeout(2000)
+
+        # Find the subject/course dropdown
+        all_selects = await page.locator("select").all()
+        print(f"Found {len(all_selects)} select element(s) on page")
+
+        if len(all_selects) == 0:
+            print("[!] No select elements found. The page structure may have changed.")
+            await browser.close()
+            return
+
+        # The first dropdown should be the subject selector
+        subject_dropdown = page.locator("select").nth(0)
+        options = await subject_dropdown.locator("option").all()
+        print(f"Subject dropdown has {len(options)} option(s):")
+        for idx, opt in enumerate(options):
+            text = (await opt.text_content()).strip()
+            print(f"  [{idx}] {text}")
+
+        # Loop through each subject option
+        submitted = 0
+        skipped = 0
+        for i in range(len(options)):
+            opt_text = (await (await subject_dropdown.locator("option").all())[i].text_content()).strip()
+
+            # Skip blank/placeholder options
+            if not opt_text or opt_text.lower() in ["select", "--select--", "-- select --", "select subject"]:
+                continue
+
+            result = await fill_feedback_for_subject(page, subject_dropdown, i)
+            if result == "done":
+                submitted += 1
+                # Re-fetch the dropdown since page may have updated after submission
+                subject_dropdown = page.locator("select").nth(0)
+            elif result == "skip":
+                skipped += 1
+                # Re-fetch the dropdown
+                subject_dropdown = page.locator("select").nth(0)
+
         print(f"\n{'='*50}")
-        print("All done! You can close the browser.")
+        print(f"All done! Submitted: {submitted}, Skipped: {skipped}")
         print(f"{'='*50}")
         await browser.close()
 
