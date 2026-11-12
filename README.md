@@ -32,14 +32,15 @@ The bot will:
 
 Edit the `RATING` variable in `feedback_bot.py` to change the default rating.
 
+
 ## Mobile (Android / Termux)
 
-The project also supports an Android-based workflow using Termux and Chromium. It uses Chrome DevTools Protocol (CDP) through `chrome-remote-interface`.
+The project also supports Android through Termux and Chromium, using Chrome DevTools Protocol (CDP) with `chrome-remote-interface`.
 
 ### Components
 
-- **`mobile_bot.js`** – Node.js automation script for interacting with the SRM student portal, detecting feedback forms and filling ratings. Supports dry-run operation.
-- **`server.js`** – Local Node.js server that provides a web dashboard to monitor automation, view live logs, and control the bot.
+- **`mobile_bot.js`** – Node.js automation script for SRM portal interaction, feedback detection and rating selection. Supports dry-run operation.
+- **`server.js`** – Local Node.js dashboard server providing bot controls and live execution logs.
 - **`public/`** – Dashboard frontend.
 
 ### Requirements
@@ -48,10 +49,10 @@ The project also supports an Android-based workflow using Termux and Chromium. I
 - Node.js and npm
 - Chromium installed in Termux
 
-### Setup
+### Setup and Usage
 
 Install dependencies:
 
 ```bash
 npm install
-
+'EOF'
