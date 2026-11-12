@@ -1,0 +1,323 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#10131b">
+<title>SRM Feedback Bot</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+    margin:0;
+    background:#10131b;
+    color:#f1f5f9;
+    font-family:system-ui,sans-serif;
+    padding:22px 16px;
+}
+main{max-width:600px;margin:auto}
+header{display:flex;justify-content:space-between;align-items:center}
+h1{font-size:23px;margin:0}
+.muted{color:#94a3b8;font-size:13px}
+.card{
+    background:#1b2230;
+    border:1px solid #30394a;
+    border-radius:15px;
+    padding:17px;
+    margin-top:17px;
+}
+.status{color:#fbbf24;font-size:13px}
+.status.online{color:#4ade80}
+.progress{
+    background:#30394a;
+    height:8px;
+    border-radius:10px;
+    overflow:hidden;
+    margin-top:12px;
+}
+#bar{height:100%;width:0;background:#38bdf8;transition:.3s}
+.subject{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:10px;
+    padding:12px 0;
+    border-bottom:1px solid #30394a;
+    font-size:13px;
+}
+.subject:last-child{border:0}
+.tag{color:#94a3b8;font-size:11px}
+button{
+    width:100%;
+    padding:14px;
+    margin-top:10px;
+    border:0;
+    border-radius:10px;
+    font-weight:700;
+    font-size:14px;
+    cursor:pointer;
+}
+.dry{background:#2563eb;color:white}
+.submit{background:#15803d;color:white}
+.stop{background:#991b1b;color:white}
+button:disabled{opacity:.4}
+#logs{
+    background:#090c12;
+    color:#cbd5e1;
+    padding:13px;
+    border-radius:10px;
+    height:220px;
+    overflow:auto;
+    white-space:pre-wrap;
+    overflow-wrap:anywhere;
+    font:12px monospace;
+}
+#prompt{
+    width:100%;
+    background:#10131b;
+    color:white;
+    border:1px solid #475569;
+    padding:12px;
+    border-radius:8px;
+}
+#promptArea{display:none}
+</style>
+</head>
+
+<body>
+<main>
+<header>
+    <div>
+        <h1>SRM Feedback Bot</h1>
+        <div class="muted">Android local dashboard</div>
+    </div>
+    <span id="connection" class="status">Checking...</span>
+</header>
+
+<section class="card">
+    <div>Browser connection</div>
+    <div class="muted" id="browser">
+        Chromium · Port 9222
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <h2 id="count">0 / 6 subjects</h2>
+    <div class="muted" id="mode">Waiting to start</div>
+</section>
+
+<section class="card">
+    <h3>Subjects</h3>
+    <div id="subjects"></div>
+</section>
+
+<section class="card">
+    <h3>Automation controls</h3>
+    <button class="dry" id="dry">Start dry run</button>
+    <button class="submit" id="submit">Start submission mode</button>
+    <button class="stop" id="stop" disabled>Stop automation</button>
+    <p class="muted">
+        Dry run fills ratings without submitting.
+        Submission mode requires individual confirmation.
+    </p>
+</section>
+
+<section class="card" id="promptArea">
+    <h3>Bot is waiting for input</h3>
+    <p class="muted">Enter the response requested in the terminal.</p>
+    <input id="prompt" placeholder="Enter response, e.g. YES">
+    <button class="dry" id="send">Send response</button>
+</section>
+
+<section class="card">
+    <h3>Live activity</h3>
+    <pre id="logs">Waiting for automation...</pre>
+</section>
+</main>
+
+<script>
+const names = [
+    'SEMANTIC WEB',
+    'COMPUTER VISION',
+    'SOFTWARE DEFINED NETWORKS',
+    'WIRELESS AND MOBILE COMMUNICATION',
+    '5G TECHNOLOGY',
+    'BEHAVIORAL PSYCHOLOGY'
+];
+
+let running = false;
+let completed = 0;
+let eventSource;
+
+const $ = id => document.getElementById(id);
+
+function renderSubjects() {
+    $('subjects').innerHTML = names.map((name,i) => `
+        <div class="subject">
+            <span>${name}</span>
+            <span class="tag" id="s${i}">Pending</span>
+        </div>
+    `).join('');
+}
+
+function addLog(line) {
+    const box = $('logs');
+    box.textContent += '\n' + line;
+    box.scrollTop = box.scrollHeight;
+
+    if (/Press ENTER|Type YES|Enter.*:/i.test(line)) {
+        $('promptArea').style.display = 'block';
+    }
+
+    const match = names.findIndex(name =>
+        line.toUpperCase().includes('SUBJECT: ' + name)
+    );
+
+    if (match >= 0) {
+        $('s' + match).textContent = 'Processing';
+    }
+
+    if (/Portal success indicator detected/i.test(line)) {
+        const index = names.findIndex(name =>
+            $('s' + names.indexOf(name)).textContent === 'Processing'
+        );
+
+        if (index >= 0) $('s' + index).textContent = 'Verified';
+    }
+
+    updateCount();
+}
+
+function updateCount() {
+    completed = names.filter((_,i) =>
+        $('s' + i).textContent === 'Verified'
+    ).length;
+
+    $('count').textContent = completed + ' / 6 subjects verified';
+    $('bar').style.width = (completed / 6 * 100) + '%';
+}
+
+async function api(url, data) {
+    const response = await fetch(url, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(data)
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) throw new Error(result.error || 'Request failed');
+
+    return result;
+}
+
+function setRunning(value) {
+    running = value;
+    $('dry').disabled = value;
+    $('submit').disabled = value;
+    $('stop').disabled = !value;
+    $('connection').textContent = value ? 'Bot running' : 'Idle';
+    $('connection').className = value ? 'status online' : 'status';
+}
+
+async function start(mode) {
+    try {
+        if (mode === 'submit') {
+            const approved = confirm(
+                'Start submission mode? Check your ratings carefully. ' +
+                'The bot will ask for confirmation for each subject.'
+            );
+
+            if (!approved) return;
+        }
+
+        $('logs').textContent = '';
+        renderSubjects();
+        completed = 0;
+        updateCount();
+
+        await api('/api/start', {
+            mode,
+            confirm: mode === 'submit'
+        });
+
+        $('mode').textContent = mode === 'dry-run'
+            ? 'Dry run'
+            : 'Submission mode';
+
+        setRunning(true);
+
+    } catch(error) {
+        alert(error.message);
+    }
+}
+
+$('dry').onclick = () => start('dry-run');
+$('submit').onclick = () => start('submit');
+
+$('stop').onclick = async () => {
+    try {
+        await api('/api/stop', {});
+    } catch(error) {
+        alert(error.message);
+    }
+};
+
+$('send').onclick = async () => {
+    const answer = $('prompt').value.trim();
+    if (!answer) return;
+
+    try {
+        await api('/api/input', {answer});
+        $('prompt').value = '';
+        $('promptArea').style.display = 'none';
+    } catch(error) {
+        alert(error.message);
+    }
+};
+
+$('prompt').addEventListener('keydown', e => {
+    if (e.key === 'Enter') $('send').click();
+});
+
+function connectEvents() {
+    eventSource = new EventSource('/api/events');
+
+    eventSource.onmessage = event => {
+        const message = JSON.parse(event.data);
+
+        if (message.type === 'history') {
+            $('logs').textContent = message.data.join('\n');
+        }
+
+        if (message.type === 'log') {
+            addLog(message.data);
+        }
+
+        if (message.type === 'status' && !message.data.running) {
+            setRunning(false);
+        }
+    };
+
+    eventSource.onerror = () => {
+        $('connection').textContent = 'Reconnecting...';
+    };
+}
+
+async function checkStatus() {
+    try {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+
+        setRunning(data.running);
+    } catch {
+        $('connection').textContent = 'Server unavailable';
+    }
+}
+
+renderSubjects();
+connectEvents();
+checkStatus();
+</script>
+</body>
+</html>
+
